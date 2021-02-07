@@ -1,0 +1,955 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width">
+  <title>Tetris</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/howler/2.1.2/howler.min.js" integrity="sha256-El7dyxdVp1e1v0xgjrrpzr5+BO29pwP0Qfl40VDffiI=" crossorigin="anonymous"></script>
+  <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
+  <style>
+    body {
+      margin: 0px;
+    }
+
+    #board, #tetris {
+      position: absolute;
+      top: 0;
+      left: 0;
+      z-index: 0;
+    }
+
+    #tetris {
+      z-index: 1;
+    }
+
+    .start {
+      color: white;
+      background-color: grey;
+      width: 60px;
+      height: 40px;
+      position: absolute;
+      left: 70px;
+      top: 180px;
+      text-align: center;
+    }
+
+    #next {
+      margin-left: 200px;
+    }
+
+    #hold {
+      border: 1px solid black;
+      position: absolute;
+    }
+
+    #score {
+      margin: 2.5em 0.5em 0.5em;
+    }
+
+    #instructions > table {
+      float: left;
+    }
+
+    #multipass {
+      position: absolute;
+      top: 85px;
+    }
+  </style>
+</head>
+<body>
+  <section id="game">
+    <canvas id="board" width="200" height="400"></canvas>
+    <div class="start">Click to Start</div>
+    <canvas id="tetris" width="200" height="400"></canvas>
+    <canvas id="next" width="80" height="360"></canvas>
+    <canvas id="hold" width="80" height="80"></canvas>
+    <button id="multipass">Create Lobby</button>
+    <label for="key">Lobby Keypass</label>
+    <textarea id="key"></textarea>
+    <textarea id="answer" placeholder="Paste friend's Keypass here"></textarea>
+    <p id="score"></p>
+  </section>
+  <section id="instructions">
+    <table>
+      <thead>
+        <tr>
+          <th>Game Action</th>
+          <th>Keyboard Key</th>
+        </tr>
+      </thead>
+      <tr>
+        <td>Move Left</td>
+        <td>LEFT Arrow</td>
+      </tr>
+      <tr>
+        <td>Move Right</td>
+        <td>RIGHT Arrow</td>
+      </tr>
+      <tr>
+        <td>Hard Drop</td>
+        <td>Space Bar</td>
+      </tr>
+      <tr>
+        <td>Soft Drop</td>
+        <td>DOWN Arrow</td>
+      </tr>
+      <tr>
+        <td>Rotate Right</td>
+        <td>UP Arrow, X</td>
+      </tr>
+      <tr>
+        <td>Rotate Left</td>
+        <td>Control, Z</td>
+      </tr>
+      <tr>
+        <td>Hold Piece</td>
+        <td>SHIFT, C</td>
+      </tr>
+      <tr>
+        <td>Un/Pause</td>
+        <td>ESC, P</td>
+      </tr>
+      <tr>
+        <td>Un/Mute</td>
+        <td>M</td>
+      </tr>
+      <tr>
+        <td>Volume Up</td>
+        <td>&gt;, &plus;</td>
+      </tr>
+      <tr>
+        <td>Volume Down</td>
+        <td>&lt;, &minus;</td>
+      </tr>
+    </table>
+    <video id="p1" height="200" width="100" autoplay></video>
+  </section>
+  <script type="text/javascript">
+    const canvas = document.getElementById('tetris');
+    const board = document.getElementById('board');
+    const next = document.getElementById('next');
+    const score = document.getElementById('score');
+    const holdCanvas = document.getElementById('hold');
+    const multipass = document.getElementById('multipass');
+    const key = document.getElementById('key');
+    const answer = document.getElementById('answer');
+    const p1 = document.getElementById('p1');
+
+    const context = canvas.getContext('2d');
+    const boardCtx = board.getContext('2d');
+    const nextCtx = next.getContext('2d');
+    const holdCtx = holdCanvas.getContext('2d');
+
+    const colors = [
+        null,
+        'blue',
+        'orange',
+        'green',
+        'purple',
+        'red',
+        'cyan',
+        'yellow'
+    ];
+    const arena = createMatrix(10, 20);
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+    pc.ontrack = e => p1.srcObject = e.streams[0];
+    pc.oniceconnectionstatechange = e => console.log(pc.iceConnectionState);
+    const stream = canvas.captureStream(30);
+    stream.getTracks().forEach(function(t) {
+      pc.addTrack(t, stream);
+    });
+
+    let bag = [];
+    let fillBag = [];
+    let holdPiece = {};
+    let holdLock = false;
+    let pause = true;
+    let width = canvas.width, height = canvas.height;
+    let dropCounter = 0;
+    let dropInterval = 1000;
+    let lastTime = 0;
+    // Bogozi [CC BY-SA 3.0 (https://creativecommons.org/licenses/by-sa/3.0)]
+    let sound = new Howl({
+      src: ['https://upload.wikimedia.org/wikipedia/commons/e/e5/Tetris_theme.ogg'],
+      sprite: {
+        theme: [0, 77000, true]
+      },
+      autoplay: false,
+      volume: 0.5
+    }), sid;
+    let player = {
+        pos: {x: 0, y: 0},
+        rpos: 0,
+        matrix: null,
+        piece: null,
+        score: 0,
+        lines: 0,
+        level: 1,
+        combo: 1,
+        lock: false,
+        lockTime: 500,
+        kick: false,
+        alpha: 1,
+        lastKick: {x: 0, y: 0}
+    }
+    let cb = (e) => {
+      sid = sound.play('theme');
+      pause = false;
+      // Initiate game
+      document.querySelector('.start').remove();
+      canvas.removeEventListener('click', cb);
+    };
+    canvas.addEventListener('click', cb);
+
+    if (!localStorage.keybinds) localStorage.keybinds = 1;
+
+    context.scale(20, 20);
+    boardCtx.scale(20, 20);
+    nextCtx.scale(20, 20);
+    holdCtx.scale(20, 20);
+    boardCtx.fillStyle = '#000';
+    boardCtx.fillRect(0, 0, width, height);
+    nextCtx.fillStyle = '#000';
+    holdCtx.fillStyle = '#000';
+
+    multipass.addEventListener('click', e => {
+      multipass.disabled = true;
+      pc.createOffer(d => pc.setLocalDescription(d), console.log);
+      pc.onicecandidate = e => {
+        if (e.candidate) return;
+        key.value = window.btoa(pc.localDescription.sdp);
+        key.select();
+      };
+    });
+    key.addEventListener('paste', e => {
+      // "offer"
+      if (pc.signalingState != "stable") return;
+      let desc = new RTCSessionDescription({ type:"offer", sdp:window.atob(e.clipboardData.getData('text')) });
+      pc.setRemoteDescription(desc)
+        .then(() => pc.createAnswer()).then(d => pc.setLocalDescription(d))
+        .catch(console.log);
+      pc.onicecandidate = e => {
+        if (e.candidate) return;
+        answer.focus();
+        answer.value = window.btoa(pc.localDescription.sdp);
+        answer.select();
+      };
+    });
+    answer.addEventListener('paste', e => {
+      if (pc.signalingState != "have-local-offer") return;
+      let desc = new RTCSessionDescription({ type:"answer", sdp:window.atob(e.clipboardData.getData('text')) });
+      pc.setRemoteDescription(desc).catch(console.log);
+    });
+
+    function arenaSweep() {
+      var basePoints = 100, lines = 0, row;
+      outer:
+      for (let x, y = arena.length - 1; y > 0; --y) {
+        for (x = 0; x < arena[y].length; ++x) {
+          if (arena[y][x] === 0) {
+            continue outer;
+          }
+        }
+
+        row = arena.splice(y, 1)[0].fill(0);
+        arena.unshift(row);
+        ++y;
+        lines += 1;
+      }
+      if (lines > 0) {
+        player.lines += lines;
+        player.level = Math.max(Math.floor(player.lines / 10), 1);
+        switch (lines) {
+          case 2:
+            player.score += (basePoints * 3) * player.level;
+            break;
+          case 3:
+            player.score += (basePoints * 5) * player.level;
+            break;
+          case 4:
+            player.score += (basePoints * 8) * player.level;
+            break;
+          default:
+            player.score += basePoints * player.level;
+        }
+        player.combo += 1;
+        if (player.combo >= 1) {
+          player.score += (basePoints / 2) * player.combo * player.level;
+        }
+        switch (player.level) {
+          case 1:
+            dropInterval = 1000;
+            break;
+          case 2:
+            dropInterval = 793;
+            break;
+          case 3:
+            dropInterval = 617.8;
+            break;
+          case 4:
+            dropInterval = 472.73;
+            break;
+          case 5:
+            dropInterval = 355.2;
+            break;
+          case 6:
+            dropInterval = 262;
+            break;
+          case 7:
+            dropInterval = 189.68;
+            break;
+          case 8:
+            dropInterval = 134.73;
+            break;
+          case 9:
+            dropInterval = 93.88;
+            break;
+          case 10:
+            dropInterval = 64.15;
+            break;
+          case 11:
+            dropInterval = 42.98;
+            break;
+          case 12:
+            dropInterval = 28.22;
+            break;
+          case 13:
+            dropInterval = 18.15;
+            break;
+          default:
+            break;
+        }
+      } else {
+        player.combo = -1;
+      }
+    }
+
+    function collide(matrix, pos) {
+      const [m, o] = [matrix, pos];
+      const h = m.length;
+      let w, x, y = 0;
+
+      for (; y < h; ++y) {
+        for (x = 0, w = m[y].length; x < w; ++x) {
+          if (m[y][x] !== 0 && (arena[y + o.y] && arena[y + o.y][x + o.x]) !== 0) {
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    function createMatrix(w, h) {
+      const matrix = [];
+      while (h--) {
+        matrix.push(new Array(w).fill(0));
+      }
+      return matrix;
+    }
+
+    function createPiece(type) {
+        if (type === 'J') {
+            // Blue
+            return [
+                [1, 0, 0],
+                [1, 1, 1],
+                [0, 0, 0]
+            ];
+        } else if (type === 'L') {
+            // Orange
+            return [
+                [0, 0, 2],
+                [2, 2, 2],
+                [0, 0, 0]
+            ];
+        } else if (type === 'S') {
+            // Green
+            return [
+                [0, 3, 3],
+                [3, 3, 0],
+                [0, 0, 0]
+            ];
+        } else if (type === 'T') {
+            // Purple
+            return [
+                [0, 4, 0],
+                [4, 4, 4],
+                [0, 0, 0]
+            ];
+        } else if (type === 'Z') {
+            // Red
+            return [
+                [5, 5, 0],
+                [0, 5, 5],
+                [0, 0, 0]
+            ];
+        } else if (type === 'I') {
+            // Cyan
+            return [
+                [0, 0, 0, 0],
+                [6, 6, 6, 6],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0]
+            ];
+        } else if (type === 'O') {
+            // Yellow
+            return [
+                [7, 7],
+                [7, 7]
+            ];
+        }
+    }
+
+    function drawArena() {
+      boardCtx.clearRect(0, 0, width, height);
+      boardCtx.fillStyle = '#000';
+      boardCtx.fillRect(0, 0, width, height);
+      drawMatrix(arena, {x: 0, y: 0}, boardCtx);
+    }
+
+    function drawMatrix(matrix, offset, ctx = context) {
+      matrix.forEach((row, y) => {
+        row.forEach((value, x) => {
+          if (value !== 0) {
+            ctx.fillStyle = colors[value];
+            ctx.fillRect(x + offset.x, y + offset.y, 1, 1);
+          }
+        });
+      });
+    }
+
+    function lock() {
+      // Add player matrix to the arena matrix
+      player.matrix.forEach((row, y) => {
+        row.forEach((value, x) => {
+          if (value !== 0) {
+            arena[y + player.pos.y][x + player.pos.x] = value;
+          }
+        });
+      });
+      playerReset();
+      arenaSweep();
+      drawArena();
+      updateScore();
+    }
+
+    function hold() {
+        if (pause || holdLock) return;
+        if (Object.keys(holdPiece).length === 0 && holdPiece.constructor === Object) {
+            holdPiece = Object.assign({}, player);
+            playerReset();
+        } else {
+            [holdPiece, player] = [player, holdPiece];
+        }
+        player.pos.y = 0;
+        player.pos.x = (arena[0].length / 2 | 0) -
+                        Math.round(player.matrix[0].length / 2);
+        player.lock = false;
+        player.lockTime = 500;
+        player.kick = false;
+
+        holdCtx.clearRect(0, 0, holdCanvas.width, holdCanvas.height);
+        drawMatrix(holdPiece.matrix, {x:0,y:0}, holdCtx);
+        holdLock = true;
+    }
+
+    // Drop
+    function playerDrop(type) {
+      if (pause) return;
+      if (type === 'soft' || type === undefined) {
+        player.pos.y += 1;
+        if (collide(player.matrix, player.pos)) {
+          player.pos.y -= 1;
+          player.lock = true;
+        }
+        if (type === 'soft') player.score += 1;
+      } else if (type === 'hard') {
+        player.lock = true;
+      }
+      dropCounter = 0;
+      player.lockTime = 500;
+      player.kick = false;
+    }
+
+    function playerMove(dir) {
+      if (pause) return;
+      let success = true;
+      player.pos.x += dir;
+      if (collide(player.matrix, player.pos)) {
+        player.pos.x -= dir;
+        success = false;
+      }
+      if (success) {
+        player.lockTime = 500;
+        player.kick = false;
+        player.alpha = 1;
+      }
+      return success;
+    }
+
+    String.prototype.shuffle = function () {
+      let a = this.split(""),
+          n = a.length;
+
+      for(let i = n - 1, j; i > 0; i--) {
+        j = Math.floor(Math.random() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
+      }
+      return a.join("");
+    }
+    function playerReset() {
+      const pieces = 'IJLOSTZ';
+      if (fillBag.length < 7) {
+        fillBag = fillBag.concat(pieces.shuffle().shuffle().shuffle().split(''));
+      }
+      while (bag.length < 7) {
+        bag.push(fillBag.shift());
+      }
+      const currentPiece = bag.shift();
+      player.matrix = createPiece(currentPiece);
+      player.piece = currentPiece;
+      player.pos.y = 0;
+      player.pos.x = (arena[0].length / 2 | 0) -
+                      Math.round(player.matrix[0].length / 2);
+      player.lock = false;
+      player.lockTime = 500;
+      player.alpha = 1;
+      holdLock = false;
+
+      // Draw the bag so the player can see what peices are coming up next
+      nextCtx.clearRect(0, 0, next.width, next.height);
+      let pos = {
+        x: 0,
+        y: 0
+      };
+      bag.forEach(piece => {
+        let matrix = createPiece(piece);
+        if (matrix.length === 4) {
+          pos.y--;
+        }
+        drawMatrix(matrix, pos, nextCtx);
+        pos.y += 3;
+      });
+      // If new piece is already hitting another, we've hit the top
+      if (collide(player.matrix, player.pos)) {
+        // GAME OVER
+        arena.forEach(row => row.fill(0));
+        // gameReset();
+      }
+    }
+    function gameReset() {
+      //TODO: Handle post-game multiplayer
+      player.score = 0;
+      player.lines = 0;
+      player.level = 1;
+      updateScore();
+    }
+
+    function kick(pos) {
+      player.pos.x += pos.x;
+      player.pos.y += pos.y;
+      player.lastKick = pos;
+    }
+    function unkick(pos) {
+      player.pos.x -= pos.x;
+      player.pos.y -= pos.y;
+      player.lastKick = null;
+    }
+    function testKicks(kicks) {
+      for (let pos in kicks) {
+        kick(kicks[pos]);
+        if (!collide(player.matrix, player.pos)) {
+          return true;
+        }
+        unkick(kicks[pos]);
+      }
+      return false;
+    }
+
+    function kickCheck(dir) {
+        // The direction is the original direction we wanted the piece to rotate
+        let state = player.rpos % 4, // 0 = 0, 1 = R, 2 = 2, 3 = L
+            kicks;
+        if (player.type === 'I') {
+            if (state === 0) {
+                if (dir === -1) {
+                    // State R->0
+                    kicks = [
+                        {x: -2, y: 0},
+                        {x: 1, y: 0},
+                        {x: -2, y: 1},
+                        {x: 1, y: -2},
+                    ];
+                } else if (dir === 1) {
+                    // State L->0
+                    kicks = [
+                        {x: 1, y: 0},
+                        {x: -2, y: 0},
+                        {x: 1, y: 2},
+                        {x: -2, y: -1},
+                    ];
+                }
+            } else if (state === 1) {
+                if (dir === 1) {
+                    // State 0->R
+                    kicks = [
+                        {x: -2, y: 0},
+                        {x: 1, y: 0},
+                        {x: -2, y: 1},
+                        {x: 1, y: -2},
+                    ];
+                } else if (dir === -1) {
+                    // State 2->R
+                    kicks = [
+                        {x: 1, y: 0},
+                        {x: -2, y: 0},
+                        {x: 1, y: 2},
+                        {x: -2, y: -1},
+                    ];
+                }
+            } else if (state === 2) {
+                if (dir === 1) {
+                    // State R->2
+                    kicks = [
+                        {x: -1, y: 0},
+                        {x: 2, y: 0},
+                        {x: -1, y: -2},
+                        {x: 2, y: 1},
+                    ];
+                } else if (dir === -1) {
+                    // State L->2
+                    kicks = [
+                        {x: -2, y: 0},
+                        {x: 1, y: 0},
+                        {x: -2, y: 1},
+                        {x: 1, y: -2},
+                    ];
+                }
+            } else if (state === 3) {
+                if (dir === -1) {
+                    // State 0->L
+                    kicks = [
+                        {x: -1, y: 0},
+                        {x: 2, y: 0},
+                        {x: -1, y: -2},
+                        {x: 2, y: 1},
+                    ];
+                } else if (dir === 1) {
+                    // State 2->L
+                    kicks = [
+                        {x: 2, y: 0},
+                        {x: -1, y: 0},
+                        {x: 2, y: -1},
+                        {x: -1, y: 2},
+                    ];
+                }
+            }
+        } else {
+            // J, L, S, T, and Z
+            if (state === 0) {
+                if (dir === -1) {
+                    // State R->0
+                    kicks = [
+                        {x: 1, y: 0},
+                        {x: 1, y: 1},
+                        {x: 0, y: -2},
+                        {x: 1, y: -2},
+                    ];
+                } else if (dir === 1) {
+                    // State L->0
+                    kicks = [
+                        {x: -1, y: 0},
+                        {x: -1, y: 1},
+                        {x: 0, y: -2},
+                        {x: -1, y: -2},
+                    ];
+                }
+            } else if (state === 1) {
+                if (dir === 1) {
+                    // State 0->R
+                    kicks = [
+                        {x: -1, y: 0},
+                        {x: -1, y: -1},
+                        {x: 0, y: 2},
+                        {x: -1, y: 2},
+                    ];
+                } else if (dir === -1) {
+                    // State 2->R
+                    kicks = [
+                        {x: -1, y: 0},
+                        {x: -1, y: -1},
+                        {x: 0, y: 2},
+                        {x: -1, y: 2},
+                    ];
+                }
+            } else if (state === 2) {
+                if (dir === 1) {
+                    // State R->2
+                    kicks = [
+                        {x: 1, y: 0},
+                        {x: 1, y: 1},
+                        {x: 0, y: -2},
+                        {x: 1, y: -2},
+                    ];
+                } else if (dir === -1) {
+                    // State L->2
+                    kicks = [
+                        {x: -1, y: 0},
+                        {x: -1, y: 1},
+                        {x: 0, y: -2},
+                        {x: -1, y: -2},
+                    ];
+                }
+            } else if (state === 3) {
+                if (dir === -1) {
+                    // State 0->L
+                    kicks = [
+                        {x: 1, y: 0},
+                        {x: 1, y: -1},
+                        {x: 0, y: 2},
+                        {x: 1, y: 2},
+                    ];
+                } else if (dir === 1) {
+                    // State 2->L
+                    kicks = [
+                        {x: 1, y: 0},
+                        {x: 1, y: -1},
+                        {x: 0, y: 2},
+                        {x: 1, y: 2},
+                    ];
+                }
+            }
+        }
+        if (kicks) {
+          let kicked = testKicks(kicks);
+          if (!kicked) {
+            playerRotate(-dir);
+          }
+          return kicked;
+        }
+        return false;
+    }
+
+    function playerRotate(dir) {
+      if (pause) return;
+      rotate(dir);
+      player.rpos++;
+      player.kick = true;
+      if (collide(player.matrix, player.pos)) {
+        player.kick = kickCheck(dir);
+        //TODO: Check for T-Spin and auto-lock, then give bonus
+      }
+      if (player.kick) {
+        //TODO: Do via position change check instead of kick check
+        player.lockTime = 500;
+        player.alpha = 1;
+      }
+    }
+
+    function rotate(dir) {
+        let matrix = player.matrix;
+        const len = matrix.length;
+        let newMatrix = new Array(len).fill(0).map(x => Array(len).fill(0));
+        const rowLength = len;
+
+        for (let i = 0, fullLength = len * len; i < fullLength; i++) {
+            let x = i % rowLength;
+            let y = Math.floor(i / rowLength);
+            let newX = rowLength - y - 1,
+                newY = x;
+            if (dir === 1) {
+              newMatrix[newY][newX] = matrix[y][x];
+            } else if (dir === -1) {
+              [newY, newX] = [newX, newY];
+              newMatrix[newY][newX] = matrix[x][y];
+            }
+        }
+        player.matrix = newMatrix;
+    }
+
+    function update(time = 0) {
+        const deltaTime = time - lastTime;
+        lastTime = time;
+
+        if (player.lock) {
+          player.lockTime -= deltaTime;
+          if (player.lockTime <= 0 && collide(player.matrix, {x:player.pos.x, y:player.pos.y+1})) {
+            lock();
+            context.globalAlpha = 1;
+          } else {
+            player.alpha -= 0.0125;
+            context.globalAlpha = player.alpha;
+          }
+        }
+
+        dropCounter += deltaTime;
+        if (dropCounter > dropInterval) {
+            playerDrop();
+        }
+
+        // draw player
+        context.clearRect(0, 0, width, height);
+        drawMatrix(player.matrix, player.pos);
+        // draw ghost
+        let pos = {
+          x: player.pos.x,
+          y: player.pos.y
+        };
+        while (!collide(player.matrix, pos)) {
+          pos.y++;
+        }
+        pos.y--;
+        context.globalAlpha = 0.5;
+        drawMatrix(player.matrix, pos);
+        context.globalAlpha = 1;
+        requestAnimationFrame(update);
+    }
+
+    function updateScore() {
+        score.textContent = `Level: ${player.level} Lines:${player.lines} Score: ${player.score}`;
+    }
+
+    document.addEventListener('keydown', event => {
+      if (localStorage.keybinds === 1) {
+        switch (event.keyCode) {
+          case 16: // Shift
+          case 67: // C
+            hold();
+            break;
+          case 17: // Control
+          case 90: // Z
+            playerRotate(-1);
+            break;
+          case 80: // P
+          case 27: // Esc
+            event.preventDefault();
+            pause = !pause;
+            if (sound.playing(sid)) {
+              sound.pause(sid);
+            } else {
+              sound.play(sid);
+            }
+            break;
+          case 32: // Space Bar
+            event.preventDefault();
+            // hard drop
+            while (!collide(player.matrix, player.pos)) {
+                player.pos.y++;
+                player.score += 2;
+            }
+            player.pos.y--;
+            player.score -= 2;
+            playerDrop('hard');
+            break;
+          case 37: // Left
+            event.preventDefault();
+            playerMove(-1);
+            break;
+          case 38: // Up
+            event.preventDefault();
+          case 88: // X
+            playerRotate(1);
+            break;
+          case 39: // Right
+            event.preventDefault();
+            playerMove(+1);
+            break;
+          case 40: // Down
+            event.preventDefault();
+            // soft drop
+            playerDrop('soft');
+            break;
+          case 77: // M
+            // "Mute" (pause)
+            if (sound.playing(sid)) {
+              sound.pause(sid);
+            } else {
+              sound.play(sid);
+            }
+            break;
+          case 187: // +
+          case 190: // >
+            // Volume Up
+            sound.volume(sound.volume() + 0.1);
+            break;
+          case 188: // -
+          case 189: // <
+            // Volume Down
+            sound.volume(sound.volume() - 0.1);
+            break;
+          default:
+            break;
+        }
+      } else {
+        switch (event.keyCode) {
+          case 16: // Shift
+            hold();
+            break;
+          case 32: // Space Bar
+            event.preventDefault();
+            pause = !pause;
+            if (sound.playing(sid)) {
+              sound.pause(sid);
+            } else {
+              sound.play(sid);
+            }
+            break;
+          case 37: // Left
+            event.preventDefault();
+            playerMove(-1);
+            break;
+          case 38: // UP
+            event.preventDefault();
+            // hard drop
+            while (!collide(player.matrix, player.pos)) {
+                player.pos.y++;
+                player.score += 2;
+            }
+            player.pos.y--;
+            player.score -= 2;
+            playerDrop('hard');
+            break;
+          case 39: // Right
+            event.preventDefault();
+            playerMove(+1);
+            break;
+          case 40: // Down
+            event.preventDefault();
+            // soft drop
+            playerDrop('soft');
+            break;
+          case 65: // A
+            playerRotate(-1);
+            break;
+          case 68: // D
+            playerRotate(1);
+            break;
+          case 77: // M
+            if (sound.playing(sid)) {
+              sound.pause(sid);
+            } else {
+              sound.play(sid);
+            }
+            break;
+          case 187: // +
+          case 190: // >
+            // Volume Up
+            sound.volume(sound.volume() + 0.1);
+            break;
+          case 188: // -
+          case 189: // <
+            // Volume Down
+            sound.volume(sound.volume() - 0.1);
+            break;
+          default:
+            break;
+        }
+      }
+    });
+
+    playerReset();
+    updateScore();
+    update();
+  </script>
+</body>
+</html>
