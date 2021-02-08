@@ -164,6 +164,7 @@
     let holdPiece = {};
     let holdLock = false;
     let pause = true;
+    let mute = false;
     let width = canvas.width, height = canvas.height;
     let dropCounter = 0;
     let dropInterval = 1000;
@@ -192,16 +193,11 @@
         alpha: 1,
         lastKick: {x: 0, y: 0}
     }
-    let cb = (e) => {
-      sid = sound.play('theme');
-      pause = false;
-      // Initiate game
+    canvas.addEventListener('click', () => {
       document.querySelector('.start').remove();
-      canvas.removeEventListener('click', cb);
-    };
-    canvas.addEventListener('click', cb);
-
-    if (!localStorage.keybinds) localStorage.keybinds = 1;
+      pause = false;
+      sid = sound.play('theme');
+    }, {"once":true});
 
     context.scale(20, 20);
     boardCtx.scale(20, 20);
@@ -213,7 +209,7 @@
     holdCtx.fillStyle = '#000';
 
     multipass.addEventListener('click', e => {
-      multipass.disabled = true;
+      // multipass.disabled = true;
       pc.createOffer(d => pc.setLocalDescription(d), console.log);
       pc.onicecandidate = e => {
         if (e.candidate) return;
@@ -239,6 +235,8 @@
       if (pc.signalingState != "have-local-offer") return;
       let desc = new RTCSessionDescription({ type:"answer", sdp:window.atob(e.clipboardData.getData('text')) });
       pc.setRemoteDescription(desc).catch(console.log);
+      key.value = "";
+      answer.value = "";
     });
 
     function arenaSweep() {
@@ -488,14 +486,20 @@
     }
 
     String.prototype.shuffle = function () {
-      let a = this.split(""),
-          n = a.length;
-
-      for(let i = n - 1, j; i > 0; i--) {
-        j = Math.floor(Math.random() * (i + 1));
-        [a[i], a[j]] = [a[j], a[i]];
+      if (window.crypto || window.msCrypto) {
+        const crypto = (window.crypto || window.msCrypto);
+        Math.random = () => {
+          const randomBuffer = new Uint32Array(1);
+          crypto.getRandomValues(randomBuffer);
+          return (randomBuffer[0] / (0xffffffff + 1));
+        }
       }
-      return a.join("");
+      let s = [...this];
+      for(let i = s.length - 1, j; i > 0; i--) {
+        j = Math.floor(Math.random() * (i + 1));
+        [s[i], s[j]] = [s[j], s[i]];
+      }
+      return s.join("");
     }
     function playerReset() {
       const pieces = 'IJLOSTZ';
@@ -534,7 +538,7 @@
       if (collide(player.matrix, player.pos)) {
         // GAME OVER
         arena.forEach(row => row.fill(0));
-        // gameReset();
+        gameReset();
       }
     }
     function gameReset() {
@@ -732,6 +736,8 @@
 
     function playerRotate(dir) {
       if (pause) return;
+      let prevPos = player.pos;
+      prevPos.rpos = player.rpos;
       rotate(dir);
       player.rpos++;
       player.kick = true;
@@ -739,211 +745,146 @@
         player.kick = kickCheck(dir);
         //TODO: Check for T-Spin and auto-lock, then give bonus
       }
-      if (player.kick) {
-        //TODO: Do via position change check instead of kick check
+      if (player.pos.x !== prevPos.x || player.pos.y !== prevPos.y || player.rpos !== prevPos.rpos) {
         player.lockTime = 500;
         player.alpha = 1;
       }
     }
 
     function rotate(dir) {
-        let matrix = player.matrix;
-        const len = matrix.length;
-        let newMatrix = new Array(len).fill(0).map(x => Array(len).fill(0));
-        const rowLength = len;
+      let matrix = player.matrix;
+      const len = matrix.length;
+      let newMatrix = new Array(len).fill(0).map(x => Array(len).fill(0));
+      const rowLength = len;
+      let x, y, newX, newY;
 
-        for (let i = 0, fullLength = len * len; i < fullLength; i++) {
-            let x = i % rowLength;
-            let y = Math.floor(i / rowLength);
-            let newX = rowLength - y - 1,
-                newY = x;
-            if (dir === 1) {
-              newMatrix[newY][newX] = matrix[y][x];
-            } else if (dir === -1) {
-              [newY, newX] = [newX, newY];
-              newMatrix[newY][newX] = matrix[x][y];
-            }
-        }
-        player.matrix = newMatrix;
+      for (let i = 0, fullLength = len * len; i < fullLength; i++) {
+          x = i % rowLength;
+          y = Math.floor(i / rowLength);
+          [newX, newY] = [rowLength - y - 1, x];
+          if (dir === 1) {
+            newMatrix[newY][newX] = matrix[y][x];
+          } else if (dir === -1) {
+            [newY, newX] = [newX, newY];
+            newMatrix[newY][newX] = matrix[x][y];
+          }
+      }
+      player.matrix = newMatrix;
     }
 
     function update(time = 0) {
-        const deltaTime = time - lastTime;
-        lastTime = time;
+      const deltaTime = time - lastTime;
+      lastTime = time;
 
-        if (player.lock) {
-          player.lockTime -= deltaTime;
-          if (player.lockTime <= 0 && collide(player.matrix, {x:player.pos.x, y:player.pos.y+1})) {
-            lock();
-            context.globalAlpha = 1;
-          } else {
-            player.alpha -= 0.0125;
-            context.globalAlpha = player.alpha;
-          }
+      if (player.lock) {
+        player.lockTime -= deltaTime;
+        if (player.lockTime <= 0 && collide(player.matrix, {x:player.pos.x, y:player.pos.y+1})) {
+          lock();
+          context.globalAlpha = 1;
+        } else {
+          player.alpha -= 0.0125;
+          context.globalAlpha = player.alpha;
         }
+      }
 
-        dropCounter += deltaTime;
-        if (dropCounter > dropInterval) {
-            playerDrop();
-        }
+      dropCounter += deltaTime;
+      if (dropCounter > dropInterval) {
+        playerDrop();
+      }
 
-        // draw player
-        context.clearRect(0, 0, width, height);
-        drawMatrix(player.matrix, player.pos);
-        // draw ghost
-        let pos = {
-          x: player.pos.x,
-          y: player.pos.y
-        };
-        while (!collide(player.matrix, pos)) {
-          pos.y++;
-        }
-        pos.y--;
+      // draw player
+      context.clearRect(0, 0, width, height);
+      drawMatrix(player.matrix, player.pos);
+      // draw ghost
+      let pos = {
+        x: player.pos.x,
+        y: player.pos.y
+      };
+      while (!collide(player.matrix, pos)) {
+        pos.y++;
+      }
+      pos.y--;
+      // Only draw the ghost if there is most than one tile away
+      if (pos.y - player.pos.y > 1) {
         context.globalAlpha = 0.5;
         drawMatrix(player.matrix, pos);
         context.globalAlpha = 1;
-        requestAnimationFrame(update);
+      }
+      requestAnimationFrame(update);
     }
 
     function updateScore() {
-        score.textContent = `Level: ${player.level} Lines:${player.lines} Score: ${player.score}`;
+      score.textContent = `Level: ${player.level} Lines:${player.lines} Score: ${player.score}`;
     }
 
     document.addEventListener('keydown', event => {
-      if (localStorage.keybinds === 1) {
-        switch (event.keyCode) {
-          case 16: // Shift
-          case 67: // C
-            hold();
-            break;
-          case 17: // Control
-          case 90: // Z
-            playerRotate(-1);
-            break;
-          case 80: // P
-          case 27: // Esc
-            event.preventDefault();
-            pause = !pause;
+      switch (event.keyCode) {
+        case 16: // Shift
+          hold();
+          break;
+        case 32: // Space Bar
+          event.preventDefault();
+          pause = !pause;
+          if (!mute) {
             if (sound.playing(sid)) {
               sound.pause(sid);
             } else {
               sound.play(sid);
             }
-            break;
-          case 32: // Space Bar
-            event.preventDefault();
-            // hard drop
-            while (!collide(player.matrix, player.pos)) {
-                player.pos.y++;
-                player.score += 2;
-            }
-            player.pos.y--;
-            player.score -= 2;
-            playerDrop('hard');
-            break;
-          case 37: // Left
-            event.preventDefault();
-            playerMove(-1);
-            break;
-          case 38: // Up
-            event.preventDefault();
-          case 88: // X
-            playerRotate(1);
-            break;
-          case 39: // Right
-            event.preventDefault();
-            playerMove(+1);
-            break;
-          case 40: // Down
-            event.preventDefault();
-            // soft drop
-            playerDrop('soft');
-            break;
-          case 77: // M
-            // "Mute" (pause)
+          }
+          break;
+        case 37: // Left
+          event.preventDefault();
+          playerMove(-1);
+          break;
+        case 38: // UP
+          event.preventDefault();
+          // hard drop
+          while (!collide(player.matrix, player.pos)) {
+              player.pos.y++;
+              player.score += 2;
+          }
+          player.pos.y--;
+          player.score -= 2;
+          playerDrop('hard');
+          break;
+        case 39: // Right
+          event.preventDefault();
+          playerMove(+1);
+          break;
+        case 40: // Down
+          event.preventDefault();
+          // soft drop
+          playerDrop('soft');
+          break;
+        case 65: // A
+          playerRotate(-1);
+          break;
+        case 68: // D
+          playerRotate(1);
+          break;
+        case 77: // M
+          if (!pause) {
+            mute = !mute;
             if (sound.playing(sid)) {
               sound.pause(sid);
             } else {
               sound.play(sid);
             }
-            break;
-          case 187: // +
-          case 190: // >
-            // Volume Up
-            sound.volume(sound.volume() + 0.1);
-            break;
-          case 188: // -
-          case 189: // <
-            // Volume Down
-            sound.volume(sound.volume() - 0.1);
-            break;
-          default:
-            break;
-        }
-      } else {
-        switch (event.keyCode) {
-          case 16: // Shift
-            hold();
-            break;
-          case 32: // Space Bar
-            event.preventDefault();
-            pause = !pause;
-            if (sound.playing(sid)) {
-              sound.pause(sid);
-            } else {
-              sound.play(sid);
-            }
-            break;
-          case 37: // Left
-            event.preventDefault();
-            playerMove(-1);
-            break;
-          case 38: // UP
-            event.preventDefault();
-            // hard drop
-            while (!collide(player.matrix, player.pos)) {
-                player.pos.y++;
-                player.score += 2;
-            }
-            player.pos.y--;
-            player.score -= 2;
-            playerDrop('hard');
-            break;
-          case 39: // Right
-            event.preventDefault();
-            playerMove(+1);
-            break;
-          case 40: // Down
-            event.preventDefault();
-            // soft drop
-            playerDrop('soft');
-            break;
-          case 65: // A
-            playerRotate(-1);
-            break;
-          case 68: // D
-            playerRotate(1);
-            break;
-          case 77: // M
-            if (sound.playing(sid)) {
-              sound.pause(sid);
-            } else {
-              sound.play(sid);
-            }
-            break;
-          case 187: // +
-          case 190: // >
-            // Volume Up
-            sound.volume(sound.volume() + 0.1);
-            break;
-          case 188: // -
-          case 189: // <
-            // Volume Down
-            sound.volume(sound.volume() - 0.1);
-            break;
-          default:
-            break;
-        }
+          }
+          break;
+        case 187: // +
+        case 190: // >
+          // Volume Up
+          if (!mute) sound.volume(sound.volume() + 0.05);
+          break;
+        case 188: // -
+        case 189: // <
+          // Volume Down
+          if (!mute) sound.volume(sound.volume() - 0.05);
+          break;
+        default:
+          break;
       }
     });
 
